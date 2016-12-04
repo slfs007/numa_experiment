@@ -5,6 +5,7 @@
 #include <future>
 #include <assert.h>
 #include <vector>
+/*where to find cpp_redis: https://github.com/Cylix/cpp_redis*/
 #include <cpp_redis/cpp_redis>
 using namespace std;
 struct Command{
