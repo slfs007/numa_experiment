@@ -5,8 +5,11 @@
 #include <future>
 #include <assert.h>
 #include <vector>
+#include<algorithm>
 /*where to find cpp_redis: https://github.com/Cylix/cpp_redis*/
 #include <cpp_redis/cpp_redis>
+
+
 using namespace std;
 struct Command{
     uint64_t times = 0;
@@ -19,6 +22,7 @@ void read_ckp(const string &path,tbb::concurrent_queue<Command> &queue,
               promise<uint64_t >& prom_d,promise<uint64_t >& prom_c){
 
     char buf[8*1024];
+    cout << "ckp path :" << path << endl;
     unique_ptr<FILE,decltype(&fclose)> ckp_file(fopen(path.c_str(),"r"),fclose);
 
     if (ckp_file.get() == nullptr){
@@ -50,6 +54,7 @@ void read_ckp(const string &path,tbb::concurrent_queue<Command> &queue,
 }
 void read_log(const string &path,tbb::concurrent_queue<Command>& queue){
     char buf[8*1024];
+    cout << "ckp path :" << path << endl;
     unique_ptr<FILE,decltype(&fclose)> log_file(fopen(path.c_str(),"r"),fclose);
     if (log_file.get() == nullptr){
         cerr << "log file open error!" << endl;
@@ -87,7 +92,25 @@ void distribute_command_in_checkpoint(tbb::concurrent_queue<Command> &queue,
                                       unordered_map<string,uint32_t > &map,
                                       vector<tbb::concurrent_queue<Command>> &sub_queue){
 
-
+    Command cmd;
+    const auto sub_queue_size = sub_queue.size();
+    vector<uint64_t > num_of_sub_squeue(sub_queue_size,0);
+    while(1){
+        while(!queue.try_pop(cmd)){
+            usleep(10);
+        }
+        //控制令 代表这结束
+        if (cmd.key.size() == 0)
+            break;
+        uint64_t i;
+        if (cmd.times > v){
+            i = min_element(num_of_sub_squeue.begin(),num_of_sub_squeue.end()) - num_of_sub_squeue.begin();
+        }else{
+            i = default_hash(cmd.key) % sub_queue_size;
+        }
+        num_of_sub_squeue[i] += cmd.times;
+        sub_queue[i].push(cmd);
+    }
 }
 void distribute_command_in_log(tbb::concurrent_queue<Command> &queue,
                                unordered_map<string,uint32_t > &map,
@@ -103,13 +126,13 @@ void distribute_command_in_log(tbb::concurrent_queue<Command> &queue,
         if (cmd.key.size() == 0)
             break;
         iter = map.find(cmd.key);
-        uint32_t i;
+        uint64_t i;
         if (iter == map.end()){
-            i = default_hash(cmd.key);
+            i = default_hash(cmd.key) % sub_queue_size ;
         }else{
             i = iter->second;
         }
-        sub_queue[i%sub_queue_size].push(cmd);
+        sub_queue[i].push(cmd);
     }
 }
 
@@ -131,7 +154,7 @@ void distribute_command(tbb::concurrent_queue<Command> &queue,
     distribute_command_in_checkpoint(queue,V,map,sub_queue);
     cout << "[dis_cmd thread] get command from log." << endl;
     distribute_command_in_log(queue,map,sub_queue);
-
+    cout << "[dis_cmd thread] send end command to sub queue" << endl;
     Command empty_cmd;
     for( auto & each_sub_queue : sub_queue){
         each_sub_queue.push(empty_cmd);
@@ -141,12 +164,12 @@ void distribute_command(tbb::concurrent_queue<Command> &queue,
 }
 void thr_exec_command(tbb::concurrent_queue<Command> &queue,string addr,const uint32_t port){
 
-    cpp_redis::redis_client client;
-    client.connect(addr,port);
-    if ( !client.is_connected()){
-        cerr << "redis connect failed. addr = " << addr << " port = " << port << endl;
-        return;
-    }
+    //cpp_redis::redis_client client;
+    //client.connect(addr,port);
+//    if ( !client.is_connected()){
+//        cerr << "redis connect failed. addr = " << addr << " port = " << port << endl;
+//        return;
+//    }
     Command cmd;
     while(1){
         while( !queue.try_pop(cmd)){
@@ -154,9 +177,11 @@ void thr_exec_command(tbb::concurrent_queue<Command> &queue,string addr,const ui
         }
         if (cmd.key.size() == 0)
             break;
-        client.set(cmd.key,cmd.value);
+//        cout << "[exec_thr " <<  this_thread::get_id()<<"]"  << " get cmd:key:" << cmd.key
+//        << "\t\tval:" << cmd.value <<  endl;
+        //client.set(cmd.key,cmd.value);
     }
-    client.disconnect();
+   //client.disconnect();
 }
 int main(int argc,char *argv[]) {
     //argv[1] number of sub_queue
@@ -166,11 +191,13 @@ int main(int argc,char *argv[]) {
     if (argc < 4){
         cerr << "usage ./numa_test [number of exec_thr] [ckp path] [log path] "
                         " [...port(number of ports must equal number of exec_thr)]" << endl;
+        return 0;
     }
     const auto n = stoi(argv[1]);
-    if (argc != n + 3){
+    if (argc != n + 4){
         cerr << "usage ./numa_test [number of exec_thr] [ckp path] [log path] "
                 " [...port(number of ports must equal number of exec_thr)]" << endl;
+        return 0;
     }
 
     promise<uint64_t > prom_d,prom_c;
@@ -179,7 +206,7 @@ int main(int argc,char *argv[]) {
     c = prom_c.get_future();
 
     tbb::concurrent_queue<Command> queue;
-    thread thr_load(thr_read_ckp_and_log, argv[1], argv[2], std::ref(queue), std::ref(prom_d), std::ref(prom_c));
+    thread thr_load(thr_read_ckp_and_log, argv[2], argv[3], std::ref(queue), std::ref(prom_d), std::ref(prom_c));
     vector<tbb::concurrent_queue<Command>> sub_queue(n);
 
     vector<thread> thr_exec;

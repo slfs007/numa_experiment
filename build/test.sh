@@ -1,0 +1,1 @@
+./numa_test 2 ./ckp.txt ./log.txt 1 2
